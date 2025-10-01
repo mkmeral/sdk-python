@@ -22,7 +22,7 @@ from strands.types.content import Messages
 
 from ..event_loop.bidirectional_event_loop import start_bidirectional_connection, stop_bidirectional_connection
 from ..models.bidirectional_model import BidirectionalModel
-from ..types.bidirectional_streaming import AudioInputEvent, BidirectionalStreamEvent
+from ..types.bidirectional_streaming import AudioInputEvent, BidirectionalStreamEvent, ImageInputEvent
 from ..utils.debug import log_event, log_flow
 
 logger = logging.getLogger(__name__)
@@ -84,14 +84,14 @@ class BidirectionalAgent:
         self._session = await start_bidirectional_connection(self)
         log_event("conversation_ready")
     
-    async def send(self, input_data: Union[str, AudioInputEvent]) -> None:
-        """Send input to the model (text or audio).
+    async def send(self, input_data: Union[str, AudioInputEvent, ImageInputEvent]) -> None:
+        """Send input to the model (text, audio, or image).
         
-        Unified method for sending both text and audio input to the model during
+        Unified method for sending text, audio, and image input to the model during
         an active conversation session.
         
         Args:
-            input_data: Either a string for text input or AudioInputEvent for audio input.
+            input_data: String for text, AudioInputEvent for audio, or ImageInputEvent for images.
             
         Raises:
             ValueError: If no active session or invalid input type.
@@ -105,10 +105,15 @@ class BidirectionalAgent:
         elif isinstance(input_data, dict) and "audioData" in input_data:
             # Handle audio input (AudioInputEvent)
             await self._session.model_session.send_audio_content(input_data)
+        elif isinstance(input_data, dict) and "imageData" in input_data:
+            # Handle image input (ImageInputEvent)
+            log_event("image_sent", mime_type=input_data.get("mimeType"))
+            await self._session.model_session.send_image_content(input_data)
         else:
             raise ValueError(
-                "Input must be either a string (text) or AudioInputEvent "
-                "(dict with audioData, format, sampleRate, channels)"
+                "Input must be either a string (text), AudioInputEvent "
+                "(dict with audioData, format, sampleRate, channels), or ImageInputEvent "
+                "(dict with imageData, mimeType, encoding)"
             )
     
 

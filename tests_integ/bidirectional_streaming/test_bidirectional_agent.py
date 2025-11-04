@@ -11,8 +11,8 @@ import logging
 import os
 
 import pytest
-from strands_tools import calculator
 
+from strands import tool
 from strands.experimental.bidirectional_streaming.agent.agent import BidirectionalAgent
 from strands.experimental.bidirectional_streaming.models.novasonic import NovaSonicBidirectionalModel
 from strands.experimental.bidirectional_streaming.models.openai import OpenAIRealtimeBidirectionalModel
@@ -21,6 +21,33 @@ from strands.experimental.bidirectional_streaming.models.gemini_live import Gemi
 from .utils.test_context import BidirectionalTestContext
 
 logger = logging.getLogger(__name__)
+
+
+# Simple calculator tool for testing
+@tool
+def calculator(operation: str, x: float, y: float) -> float:
+    """Perform basic arithmetic operations.
+    
+    Args:
+        operation: The operation to perform (add, subtract, multiply, divide)
+        x: First number
+        y: Second number
+        
+    Returns:
+        Result of the operation
+    """
+    if operation == "add":
+        return x + y
+    elif operation == "subtract":
+        return x - y
+    elif operation == "multiply":
+        return x * y
+    elif operation == "divide":
+        if y == 0:
+            raise ValueError("Cannot divide by zero")
+        return x / y
+    else:
+        raise ValueError(f"Unknown operation: {operation}")
 
 
 # Provider configurations
@@ -134,7 +161,7 @@ def agent_with_calculator(provider_config):
 
 @pytest.mark.asyncio
 async def test_bidirectional_agent(agent_with_calculator, audio_generator, provider_config):
-    """Test multi-turn conversation with follow-up questions across providers.
+    """Test multi-turn conversation with tool execution across providers.
     
     This test runs against all configured providers (Nova Sonic, OpenAI, etc.)
     to validate provider-agnostic functionality.
@@ -155,12 +182,10 @@ async def test_bidirectional_agent(agent_with_calculator, audio_generator, provi
     async with BidirectionalTestContext(agent_with_calculator, audio_generator) as ctx:
         # Turn 1: Simple greeting to test basic audio I/O
         await ctx.say("Hello, can you hear me?")
-        # Wait for silence to trigger provider's VAD/silence detection
         await asyncio.sleep(silence_duration)
         await ctx.wait_for_response()
 
         text_outputs_turn1 = ctx.get_text_outputs()
-        all_text_turn1 = " ".join(text_outputs_turn1).lower()
         
         # Validate turn 1 - just check we got a response
         assert len(text_outputs_turn1) > 0, (
@@ -170,23 +195,46 @@ async def test_bidirectional_agent(agent_with_calculator, audio_generator, provi
         logger.info(f"[{provider_name}] ✓ Turn 1 complete: received response")
         logger.info(f"[{provider_name}]   Response: {text_outputs_turn1[0][:100]}...")
 
-        # Turn 2: Follow-up to test multi-turn conversation
-        await ctx.say("What's your name?")
-        # Wait for silence to trigger provider's VAD/silence detection
+        # Turn 2: Test tool execution with calculator
+        await ctx.say("What is 15 plus 27?")
         await asyncio.sleep(silence_duration)
         await ctx.wait_for_response()
 
         text_outputs_turn2 = ctx.get_text_outputs()
+        all_text_turn2 = " ".join(text_outputs_turn2).lower()
         
-        # Validate turn 2 - check we got more responses
+        # Validate turn 2 - check we got more responses and the answer contains 42
         assert len(text_outputs_turn2) > len(text_outputs_turn1), (
             f"[{provider_name}] No new text output in turn 2"
         )
+        # Check for "42" or "forty-two" or "forty two" (providers may spell it out)
+        assert any(answer in all_text_turn2 for answer in ["42", "forty-two", "forty two"]), (
+            f"[{provider_name}] Calculator result not found in response: {all_text_turn2}"
+        )
         
-        logger.info(f"[{provider_name}] ✓ Turn 2 complete: multi-turn conversation works")
-        logger.info(f"[{provider_name}]   Total responses: {len(text_outputs_turn2)}")
+        logger.info(f"[{provider_name}] ✓ Turn 2 complete: calculator tool executed successfully")
+        logger.info(f"[{provider_name}]   Response contains correct answer (42)")
 
-        # Validate full conversation
+        # Turn 3: Follow-up to test multi-turn conversation
+        await ctx.say("Now multiply that by 2")
+        await asyncio.sleep(silence_duration)
+        await ctx.wait_for_response()
+
+        text_outputs_turn3 = ctx.get_text_outputs()
+        all_text_turn3 = " ".join(text_outputs_turn3).lower()
+        
+        # Validate turn 3 - check we got more responses and the answer contains 84
+        assert len(text_outputs_turn3) > len(text_outputs_turn2), (
+            f"[{provider_name}] No new text output in turn 3"
+        )
+        # Check for "84" or "eighty-four" or "eighty four" (providers may spell it out)
+        assert any(answer in all_text_turn3 for answer in ["84", "eighty-four", "eighty four"]), (
+            f"[{provider_name}] Calculator result not found in response: {all_text_turn3}"
+        )
+        
+        logger.info(f"[{provider_name}] ✓ Turn 3 complete: multi-turn tool execution works")
+        logger.info(f"[{provider_name}]   Total responses: {len(text_outputs_turn3)}")
+
         # Validate audio outputs
         audio_outputs = ctx.get_audio_outputs()
         assert len(audio_outputs) > 0, f"[{provider_name}] No audio output received"
@@ -194,9 +242,10 @@ async def test_bidirectional_agent(agent_with_calculator, audio_generator, provi
         
         # Summary
         logger.info("=" * 60)
-        logger.info(f"[{provider_name}] ✓ Multi-turn conversation test PASSED")
+        logger.info(f"[{provider_name}] ✓ Multi-turn conversation with tools test PASSED")
         logger.info(f"  Provider: {provider_name}")
         logger.info(f"  Total events: {len(ctx.get_events())}")
-        logger.info(f"  Text responses: {len(text_outputs_turn2)}")
+        logger.info(f"  Text responses: {len(text_outputs_turn3)}")
         logger.info(f"  Audio chunks: {len(audio_outputs)} ({total_audio_bytes:,} bytes)")
+        logger.info(f"  Tool executions: 2 (15+27=42, 42*2=84)")
         logger.info("=" * 60)

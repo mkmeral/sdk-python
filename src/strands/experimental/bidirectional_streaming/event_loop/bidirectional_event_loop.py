@@ -65,7 +65,7 @@ class BidirectionalConnection:
 
 
 async def start_bidirectional_connection(agent: "BidirectionalAgent") -> BidirectionalConnection:
-    """Initialize bidirectional session with conycurrent background tasks.
+    """Initialize bidirectional session with concurrent background tasks.
 
     Creates a model-specific session and starts background tasks for processing
     model events, executing tools, and managing the session lifecycle.
@@ -90,7 +90,7 @@ async def start_bidirectional_connection(agent: "BidirectionalAgent") -> Bidirec
     # This is critical - Nova Sonic needs response processing during initialization
     logger.debug("Starting background processors for concurrent processing")
     session.background_tasks = [
-        asyncio.create_task(_process_model_events(session)),  # Handle model responses
+        asyncio.create_task(_process_model_stream(session)),  # Handle model responses
         asyncio.create_task(_process_tool_execution(session)),  # Execute tools concurrently
     ]
 
@@ -216,24 +216,20 @@ async def _handle_interruption(session: BidirectionalConnection) -> None:
             except asyncio.QueueEmpty:
                 break
 
-        # Also clear the agent's audio output queue
+        # Clear audio events from agent's output queue
         audio_cleared = 0
-        # Create a temporary list to hold non-audio events
         temp_events = []
-        try:
-            while True:
+        
+        while not session.agent._output_queue.empty():
+            try:
                 event = session.agent._output_queue.get_nowait()
-                # Check for audio events
-                event_type = event.get("type", "")
-                if event_type == "bidirectional_audio_stream":
+                if event.get("type") == "bidirectional_audio_stream":
                     audio_cleared += 1
                 else:
-                    # Keep non-audio events
                     temp_events.append(event)
-        except asyncio.QueueEmpty:
-            pass
-
-        # Put back non-audio events
+            except asyncio.QueueEmpty:
+                break
+        
         for event in temp_events:
             session.agent._output_queue.put_nowait(event)
 
@@ -248,8 +244,77 @@ async def _handle_interruption(session: BidirectionalConnection) -> None:
         logger.debug("Interruption handled - tools cancelled: %d, audio cleared: %d", cancelled_tools, cleared_count)
 
 
-async def _process_model_events(session: BidirectionalConnection) -> None:
-    """Process model events and convert them to Strands format.
+async def _handle_model_event(session: BidirectionalConnection, event: dict) -> None:
+    """Handle a single model event.
+    
+    Args:
+        session: BidirectionalConnection containing model.
+        event: Event dictionary from model.
+    """
+    event_type = event.get("type", "")
+    
+    # Handle interruption detection
+    if event_type == "bidirectional_interruption":
+        logger.debug("Interruption forwarded")
+        await _handle_interruption(session)
+        await session.agent._output_queue.put(event)
+        return
+
+    # Queue tool requests for concurrent execution
+    if "current_tool_use" in event:
+        tool_use = event.get("current_tool_use")
+        if tool_use:
+            tool_name = tool_use.get("name")
+            logger.debug("Tool usage detected: %s", tool_name)
+            await session.tool_queue.put(tool_use)
+        await session.agent._output_queue.put(event)
+        return
+
+    # Send all output events to Agent for receive() method
+    await session.agent._output_queue.put(event)
+
+    # Update Agent conversation history for user transcripts
+    if event_type == "bidirectional_transcript_stream":
+        source = event.get("source")
+        text = event.get("text", "")
+        if source == "user" and text.strip():
+            user_message = {"role": "user", "content": text}
+            session.agent.messages.append(user_message)
+            logger.debug("User transcript added to history")
+
+
+async def _handle_connection_error(session: BidirectionalConnection, error: Exception) -> bool:
+    """Handle connection errors with automatic reconnection.
+    
+    Args:
+        session: BidirectionalConnection containing model.
+        error: Exception that occurred.
+        
+    Returns:
+        True if reconnected successfully, False if should propagate error.
+    """
+    # Check if this is a reconnectable error and reconnection is enabled
+    if not (_is_reconnectable_error(error) and session.agent.enable_reconnection):
+        logger.error("Model events error: %s", str(error))
+        traceback.print_exc()
+        session.active = False
+        return False
+    
+    logger.warning("Connection lost: %s, attempting reconnection...", str(error))
+    
+    try:
+        await _reconnect_session(session)
+        logger.info("Reconnection successful, resuming event processing")
+        return True
+        
+    except Exception as reconnect_error:
+        logger.error("Reconnection failed: %s", str(reconnect_error))
+        session.active = False
+        raise
+
+
+async def _process_model_stream(session: BidirectionalConnection) -> None:
+    """Process model event stream and convert to Strands format.
 
     Background task that handles all model responses, converts provider-specific
     events to standardized formats, and manages interruption detection.
@@ -257,58 +322,26 @@ async def _process_model_events(session: BidirectionalConnection) -> None:
     Args:
         session: BidirectionalConnection containing model.
     """
-    logger.debug("Model events processor started")
-    try:
-        async for provider_event in session.model.receive():
-            if not session.active:
-                break
-
-            # Basic validation - skip invalid events
-            if not isinstance(provider_event, dict):
-                continue
-            
-            strands_event = provider_event
-
-            # Get event type
-            event_type = strands_event.get("type", "")
-            
-            # Handle interruption detection
-            if event_type == "bidirectional_interruption":
-                logger.debug("Interruption forwarded")
-                await _handle_interruption(session)
-                # Forward interruption event to agent for application-level handling
-                await session.agent._output_queue.put(strands_event)
-                continue
-
-            # Queue tool requests for concurrent execution
-            # Check for ToolUseStreamEvent (standard agent event)
-            if "current_tool_use" in strands_event:
-                tool_use = strands_event.get("current_tool_use")
-                if tool_use:
-                    tool_name = tool_use.get("name")
-                    logger.debug("Tool usage detected: %s", tool_name)
-                    await session.tool_queue.put(tool_use)
-                # Forward ToolUseStreamEvent to output queue for client visibility
-                await session.agent._output_queue.put(strands_event)
-                continue
-
-            # Send all output events to Agent for receive() method
-            await session.agent._output_queue.put(strands_event)
-
-            # Update Agent conversation history for user transcripts
-            if event_type == "bidirectional_transcript_stream":
-                source = strands_event.get("source")
-                text = strands_event.get("text", "")
-                if source == "user" and text.strip():
-                    user_message = {"role": "user", "content": text}
-                    session.agent.messages.append(user_message)
-                    logger.debug("User transcript added to history")
-
-    except Exception as e:
-        logger.error("Model events error: %s", str(e))
-        traceback.print_exc()
-    finally:
-        logger.debug("Model events processor stopped")
+    logger.debug("Model stream processor started")
+    
+    while session.active:
+        try:
+            async for provider_event in session.model.receive():
+                if not session.active:
+                    return
+                
+                # Basic validation - skip invalid events
+                if not isinstance(provider_event, dict):
+                    logger.warning("Skipping invalid event (not a dict): %s", type(provider_event).__name__)
+                    continue
+                
+                await _handle_model_event(session, provider_event)
+                
+        except Exception as e:
+            if not await _handle_connection_error(session, e):
+                raise
+    
+    logger.debug("Model stream processor stopped")
 
 
 async def _process_tool_execution(session: BidirectionalConnection) -> None:
@@ -329,7 +362,7 @@ async def _process_tool_execution(session: BidirectionalConnection) -> None:
             tool_id = tool_use.get("toolUseId")
             
             session.tool_count += 1
-            print(f"\nTool #{session.tool_count}: {tool_name}")
+            logger.info("Tool #%d: %s", session.tool_count, tool_name)
             
             logger.debug("Tool execution started: %s (id: %s)", tool_name, tool_id)
 
@@ -376,7 +409,60 @@ async def _process_tool_execution(session: BidirectionalConnection) -> None:
     logger.debug("Tool execution processor stopped")
 
 
+def _is_reconnectable_error(error: Exception) -> bool:
+    """Check if error is reconnectable (connection-related).
+    
+    Args:
+        error: Exception to check.
+        
+    Returns:
+        True if error is reconnectable, False otherwise.
+    """
+    # Check for standard connection errors
+    return isinstance(error, (ConnectionError, ConnectionResetError, BrokenPipeError))
 
+
+async def _reconnect_session(session: BidirectionalConnection) -> None:
+    """Reconnect session after connection failure.
+    
+    Closes old connection and attempts to reconnect based on agent's max_reconnection_attempts.
+    Uses agent's existing state (messages, system_prompt, tools).
+    
+    Args:
+        session: BidirectionalConnection to reconnect.
+        
+    Raises:
+        Exception: If all reconnection attempts fail.
+    """
+    # Close old connection (ignore errors)
+    try:
+        await session.model.close()
+    except Exception as e:
+        logger.debug("Error closing old connection: %s", str(e))
+    
+    max_attempts = session.agent.max_reconnection_attempts
+    
+    # Try reconnecting up to max_attempts times
+    for attempt in range(max_attempts):
+        try:
+            logger.debug("Reconnection attempt %d/%d", attempt + 1, max_attempts)
+            
+            # Reconnect using agent's existing state
+            await session.model.connect(
+                system_prompt=session.agent.system_prompt,
+                tools=session.agent.tool_registry.get_all_tool_specs(),
+                messages=session.agent.messages
+            )
+            
+            logger.info("Reconnected successfully after %d attempts", attempt + 1)
+            return
+            
+        except Exception as e:
+            logger.warning("Reconnection attempt %d failed: %s", attempt + 1, str(e))
+            if attempt == max_attempts - 1:  # Last attempt
+                logger.error("All %d reconnection attempts failed", max_attempts)
+                raise
+            await asyncio.sleep(1)  # Brief pause between attempts
 
 
 async def _execute_tool_with_strands(session: BidirectionalConnection, tool_use: dict) -> None:

@@ -165,6 +165,8 @@ class BidirectionalAgent:
         hooks: Optional[list[HookProvider]] = None,
         trace_attributes: Optional[Mapping[str, AttributeValue]] = None,
         description: Optional[str] = None,
+        enable_reconnection: bool = True,
+        max_reconnection_attempts: int = 3,
     ):
         """Initialize bidirectional agent with required model and optional configuration.
 
@@ -181,10 +183,16 @@ class BidirectionalAgent:
             hooks: Hooks to be added to the agent hook registry.
             trace_attributes: Custom trace attributes to apply to the agent's trace span.
             description: Description of what the Agent does.
+            enable_reconnection: Whether to automatically reconnect on connection failures (default: True).
+            max_reconnection_attempts: Maximum number of reconnection attempts (default: 3).
         """
         self.model = model
         self.system_prompt = system_prompt
         self.messages = messages or []
+        
+        # Reconnection configuration
+        self.enable_reconnection = enable_reconnection
+        self.max_reconnection_attempts = max_reconnection_attempts
         
         # Agent identification
         self.agent_id = _identifier.validate(agent_id or _DEFAULT_AGENT_ID, _identifier.Identifier.AGENT)

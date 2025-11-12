@@ -539,6 +539,8 @@ class BidiAgent:
                 try:
                     event = await input_callable()
                     await event_queue.put(event)
+                    # Yield control to allow send_to_agent to process events
+                    await asyncio.sleep(0)
                 except asyncio.CancelledError:
                     # Task cancelled, exit cleanly
                     break

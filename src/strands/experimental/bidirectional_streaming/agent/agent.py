@@ -474,14 +474,12 @@ class BidiAgent:
         self,
         inputs: list[BidiInput],
         outputs: list[BidiOutput],
-        output_queue_size: int = 100,
     ) -> None:
         """Internal method to run send/receive loops with callables.
         
         Args:
             inputs: List of input callables.
             outputs: List of output callables.
-            output_queue_size: Max queue size per output for backpressure (default: 100).
         """
 
         async def output_writer(output_callable: BidiOutput, event_queue: asyncio.Queue):
@@ -508,7 +506,7 @@ class BidiAgent:
             we drop events for that output only (backpressure).
             """
             # Create a queue for each output
-            output_queues = [asyncio.Queue(maxsize=output_queue_size) for _ in outputs]
+            output_queues = [asyncio.Queue() for _ in outputs]
             
             # Start a writer task for each output
             writer_tasks = [
@@ -555,7 +553,7 @@ class BidiAgent:
             queued and processed in the order they arrive.
             """
             # Bounded queue to prevent unbounded memory growth
-            event_queue = asyncio.Queue(maxsize=1000)
+            event_queue = asyncio.Queue()
             
             # Start a reader task for each input
             reader_tasks = [

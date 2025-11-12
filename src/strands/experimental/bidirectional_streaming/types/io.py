@@ -1,46 +1,42 @@
-"""BidiIO protocol for bidirectional streaming IO channels.
+"""BidiIO protocols for bidirectional streaming IO channels.
 
-Defines the standard interface that all bidirectional IO channels must implement
-for integration with BidirectionalAgent. This protocol enables clean
-separation between the agent's core logic and hardware-specific implementations.
+Defines callable protocols for input and output channels that can be used
+with BidirectionalAgent. This approach provides better typing and flexibility
+by separating input and output concerns into independent callables.
 """
 
-from typing import Protocol
+from typing import Protocol, Awaitable
+
+from .events import BidiInputEvent, BidiOutputEvent
 
 
-class BidiIO(Protocol):
-    """Base protocol for bidirectional IO channels.
+class BidiInput(Protocol):
+    """Protocol for bidirectional input callables.
     
-    Defines the interface that IO channels must implement to work with
-    BidirectionalAgent. IO channels handle hardware abstraction (audio, video,
-    WebSocket, etc.) while the agent handles model communication and logic.
+    Input callables read data from a source (microphone, camera, websocket, etc.)
+    and return events to be sent to the model.
     """
 
-    async def start(self) -> dict:
-
-        """Setup IO channels for input and output."""
-        ...
-
-    async def send(self) -> dict:
-        """Read input data from the IO channel source.
+    def __call__(self) -> Awaitable[BidiInputEvent]:
+        """Read input data from the source.
         
         Returns:
-            dict: Input event data to send to the model.
+            Awaitable that resolves to an input event (audio, text, image, etc.)
         """
         ...
 
-    async def receive(self, event: dict) -> None:
-        """Process output event from the model through the IO channel.
+
+class BidiOutput(Protocol):
+    """Protocol for bidirectional output callables.
+    
+    Output callables receive events from the model and handle them appropriately
+    (play audio, display text, send over websocket, etc.).
+    """
+
+    def __call__(self, event: BidiOutputEvent) -> Awaitable[None]:
+        """Process output event from the model.
         
         Args:
-            event: Output event from the model to handle.
-        """
-        ...
-
-    def stop(self) -> None:
-        """Clean up IO channel resources.
-        
-        Called by the agent during shutdown to ensure proper
-        resource cleanup (streams, connections, etc.).
+            event: Output event from the model (audio, text, tool calls, etc.)
         """
         ...

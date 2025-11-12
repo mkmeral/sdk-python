@@ -6,6 +6,9 @@ from .agent.agent import BidiAgent
 # IO channels - Hardware abstraction
 from .io.audio import AudioIO
 
+# IO protocols - For typing custom IO implementations
+from .types.io import BidiInput, BidiOutput
+
 # Model interface (for custom implementations)
 from .models.bidirectional_model import BidiModel
 
@@ -45,6 +48,9 @@ __all__ = [
     "BidiAgent",
     # IO channels
     "AudioIO",
+    # IO protocols
+    "BidiInput",
+    "BidiOutput",
     # Model providers
     "BidiGeminiLiveModel",
     "BidiNovaSonicModel",

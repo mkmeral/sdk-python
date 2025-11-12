@@ -109,9 +109,15 @@ class AudioIO:
     async def input(self) -> BidiAudioInputEvent:
         """Read audio from microphone (BidiInput callable).
         
+        Automatically starts audio streams on first call if not already started.
+        
         Returns:
             BidiAudioInputEvent with audio data from microphone.
         """
+        # Lazy initialization - start on first use
+        if not self.audio:
+            await self.start()
+        
         audio_bytes = self.input_stream.read(self.chunk_size, exception_on_overflow=False)
 
         return BidiAudioInputEvent(
@@ -124,9 +130,15 @@ class AudioIO:
     async def output(self, event: BidiOutputEvent) -> None:
         """Handle output events from model (BidiOutput callable).
         
+        Automatically starts audio streams on first call if not already started.
+        
         Args:
             event: Output event from the model to process.
         """
+        # Lazy initialization - start on first use
+        if not self.audio:
+            await self.start()
+        
         if isinstance(event, BidiAudioStreamEvent):
             self.output_stream.write(base64.b64decode(event["audio"]))
             # Yield control to prevent event loop hogging

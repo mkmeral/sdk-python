@@ -429,21 +429,16 @@ class BidiAgent:
     ) -> None:
         """Run the agent using provided input and output callables.
 
-        All inputs and outputs run concurrently and non-blocking:
-        - Multiple inputs can provide events simultaneously
-        - Slow outputs don't block fast outputs
-        - Per-output queues with backpressure (drops events if queue full)
+        Beta limitation: Currently supports only single input and single output.
+        Multiple inputs/outputs will be supported in a future release.
 
         Args:
-            inputs: List of input callables that return BidiInputEvent.
-                Each callable runs independently and continuously.
-            outputs: List of output callables that accept BidiOutputEvent.
-                Each callable has its own queue (max 100 events) for backpressure.
+            inputs: List containing a single input callable that returns BidiInputEvent.
+            outputs: List containing a single output callable that accepts BidiOutputEvent.
                 
         Example:
             ```python
             audio_io = AudioIO(audio_config={"input_sample_rate": 16000})
-            await audio_io.start()
             
             agent = BidiAgent(model=model, tools=[calculator])
             await agent.run(
@@ -455,128 +450,66 @@ class BidiAgent:
             ```
 
         Raises:
-            ValueError: If inputs or outputs lists are empty.
+            ValueError: If inputs or outputs lists are empty or contain multiple items.
             Exception: Any exception from the IO layer.
         """
         if not inputs:
             raise ValueError("inputs parameter cannot be empty. Provide at least one input callable.")
         if not outputs:
             raise ValueError("outputs parameter cannot be empty. Provide at least one output callable.")
+        
+        # Beta limitation: single input/output only
+        if len(inputs) > 1:
+            raise ValueError("Beta limitation: Multiple inputs not yet supported. Please provide a single input callable.")
+        if len(outputs) > 1:
+            raise ValueError("Beta limitation: Multiple outputs not yet supported. Please provide a single output callable.")
 
         # Auto-manage session lifecycle
         if self.active:
-            await self._run_with_callables(inputs, outputs)
+            await self._run_simple(inputs[0], outputs[0])
         else:
             async with self:
-                await self._run_with_callables(inputs, outputs)
+                await self._run_simple(inputs[0], outputs[0])
 
-    async def _run_with_callables(
+    async def _run_simple(
         self,
-        inputs: list[BidiInput],
-        outputs: list[BidiOutput],
+        input_callable: BidiInput,
+        output_callable: BidiOutput,
     ) -> None:
-        """Internal method to run send/receive loops with callables.
+        """Internal method to run send/receive loops with single input/output.
+        
+        Simplified implementation for beta release.
         
         Args:
-            inputs: List of input callables.
-            outputs: List of output callables.
+            input_callable: Single input callable.
+            output_callable: Single output callable.
         """
 
-        async def output_writer(output_callable: BidiOutput, event_queue: asyncio.Queue):
-            """Continuously write events to a single output.
-            
-            Each output runs independently without blocking others.
-            Has its own queue for backpressure handling.
-            """
-            while self.active:
-                try:
-                    event = await event_queue.get()
-                    await output_callable(event)
-                except asyncio.CancelledError:
-                    # Task cancelled, exit cleanly
-                    break
-                except Exception as e:
-                    logger.warning("Error writing to output: %s", e)
-                    # Continue processing other events despite error
-
-        async def receive_from_agent():
-            """Receive events from agent and distribute to all output queues.
-            
-            Each output has its own queue. If an output's queue is full,
-            we drop events for that output only (backpressure).
-            """
-            # Create a queue for each output
-            output_queues = [asyncio.Queue() for _ in outputs]
-            
-            # Start a writer task for each output
-            writer_tasks = [
-                asyncio.create_task(output_writer(output, queue))
-                for output, queue in zip(outputs, output_queues)
-            ]
-            
-            try:
-                async for event in self.receive():
-                    # Try to send to all outputs without blocking
-                    for i, queue in enumerate(output_queues):
-                        try:
-                            queue.put_nowait(event)
-                        except asyncio.QueueFull:
-                            logger.warning("Output %d queue full, dropping event", i)
-            finally:
-                # Cancel all writer tasks on shutdown
-                for task in writer_tasks:
-                    task.cancel()
-                await asyncio.gather(*writer_tasks, return_exceptions=True)
-
-        async def input_reader(input_callable: BidiInput, event_queue: asyncio.Queue):
-            """Continuously read from a single input and queue events.
-            
-            Each input runs independently without blocking others.
-            """
+        async def send_loop():
+            """Read from input and send to agent."""
             while self.active:
                 try:
                     event = await input_callable()
-                    await event_queue.put(event)
-                    # Yield control to allow send_to_agent to process events
+                    await self.send(event)
+                    # Yield control to prevent event loop starvation
                     await asyncio.sleep(0)
                 except asyncio.CancelledError:
-                    # Task cancelled, exit cleanly
                     break
                 except Exception as e:
-                    logger.warning("Error reading from input: %s", e)
-                    await asyncio.sleep(0.1)  # Brief pause on error
+                    logger.warning("Error in send loop: %s", e)
+                    await asyncio.sleep(0.1)
 
-        async def send_to_agent():
-            """Process events from all inputs and send to agent.
-            
-            All inputs run concurrently and non-blocking. Events are
-            queued and processed in the order they arrive.
-            """
-            # Bounded queue to prevent unbounded memory growth
-            event_queue = asyncio.Queue()
-            
-            # Start a reader task for each input
-            reader_tasks = [
-                asyncio.create_task(input_reader(input_callable, event_queue))
-                for input_callable in inputs
-            ]
-            
+        async def receive_loop():
+            """Receive from agent and write to output."""
             try:
-                while self.active:
-                    try:
-                        # Use timeout to periodically check active status
-                        event = await asyncio.wait_for(event_queue.get(), timeout=0.5)
-                        await self.send(event)
-                    except asyncio.TimeoutError:
-                        # No event received, check if still active
-                        continue
-            finally:
-                # Cancel all reader tasks on shutdown
-                for task in reader_tasks:
-                    task.cancel()
-                await asyncio.gather(*reader_tasks, return_exceptions=True)
+                async for event in self.receive():
+                    await output_callable(event)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning("Error in receive loop: %s", e)
 
-        await asyncio.gather(receive_from_agent(), send_to_agent(), return_exceptions=True)
+        await asyncio.gather(send_loop(), receive_loop(), return_exceptions=True)
 
     def _validate_active_connection(self) -> None:
         """Validate that an active connection exists.

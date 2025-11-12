@@ -13,17 +13,32 @@ from strands_tools import calculator
 
 
 async def main():
-    """Test the BidirectionalAgent API."""
-
+    """Test the BidirectionalAgent API with callable IO."""
+    
+    # Create audio IO
+    audio_io = AudioIO()
     
     # Nova Sonic model
-    adapter = AudioIO()
     model = BidiNovaSonicModel(region="us-east-1")
 
-    async with BidiAgent(model=model, tools=[calculator]) as agent:
-        print("New BidiAgent Experience")
-        print("Try asking: 'What is 25 times 8?' or 'Calculate the square root of 144'")
-        await agent.run(io_channels=[adapter])
+    try:
+        async with BidiAgent(model=model, tools=[calculator]) as agent:
+            print("🎤 BidiAgent with Nova Sonic")
+            print("Try asking: 'What is 25 times 8?' or 'Calculate the square root of 144'")
+            print("Press Ctrl+C to stop\n")
+            
+            # Run with callable inputs and outputs
+            await agent.run(
+                inputs=[audio_io.input],
+                outputs=[audio_io.output]
+            )
+    except KeyboardInterrupt:
+        print("\n⏹️ Stopping...")
+    finally:
+        # Clean up audio resources
+        print("🧹 Cleaning up...")
+        await audio_io.stop()
+        print("✅ Done")
 
 
 if __name__ == "__main__":

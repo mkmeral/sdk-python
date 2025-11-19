@@ -107,6 +107,9 @@ class BidiAgent:
 
         # Initialize tool registry
         self.tool_registry = ToolRegistry()
+        
+        # Set agent instance for tool compatibility validation
+        self.tool_registry.set_agent_instance(self)
 
         if tools is not None:
             self.tool_registry.process_tools(tools)

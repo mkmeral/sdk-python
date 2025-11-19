@@ -659,6 +659,61 @@ class DecoratedFunctionTool(AgentTool, Generic[P, R]):
         properties["Function"] = self._tool_func.__name__
         return properties
 
+    def get_supported_agent_type(self) -> Any:
+        """Get the agent type this tool supports from its type hint.
+
+        Returns:
+            The agent type from the BaseToolContext[T] type hint, or None if no context parameter.
+            This can be a single type or a Union type.
+        """
+        context_param = self._metadata._context_param
+        if not context_param:
+            return None  # No context parameter = works with all agents
+
+        # Get type hints for the function
+        try:
+            # Include extras to preserve Annotated types
+            type_hints = get_type_hints(self._metadata.func, include_extras=True)
+        except Exception:
+            # If type hints fail, return None to allow all agents
+            return None
+
+        context_type = type_hints.get(context_param)
+        if not context_type:
+            return None  # No type hint = works with all agents
+
+        # Extract agent type from BaseToolContext[AgentType] or ToolContext
+        return self._extract_agent_type_from_hint(context_type)
+
+    def _extract_agent_type_from_hint(self, context_type: Any) -> Any:
+        """Extract the agent type from the context type hint.
+
+        Args:
+            context_type: The type hint for the context parameter
+
+        Returns:
+            The agent type (e.g., Agent, BidiAgent, or Union[Agent, BidiAgent])
+        """
+        from ..types.tools import _AgentToolContext
+        from ..agent.agent import Agent
+        
+        # Handle ToolContext (which is _AgentToolContext) - it's Agent-only
+        if context_type is _AgentToolContext or (hasattr(context_type, "__name__") and 
+                                                   context_type.__name__ == "_AgentToolContext"):
+            return Agent
+        
+        origin = get_origin(context_type)
+
+        # Handle BaseToolContext[T] - extract T
+        if origin is not None:
+            args = get_args(context_type)
+            if args:
+                # Return the first type argument (the agent type)
+                return args[0]
+
+        # If we can't extract a type, return None (works with all)
+        return None
+
 
 # Handle @decorator
 @overload

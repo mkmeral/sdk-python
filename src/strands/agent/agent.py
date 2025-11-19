@@ -211,8 +211,11 @@ class Agent:
         self.load_tools_from_directory = load_tools_from_directory
 
         self.tool_registry = ToolRegistry()
+        
+        # Set agent instance for tool compatibility validation
+        self.tool_registry.set_agent_instance(self)
 
-        # Process tool list if provided
+        # Process tool list if provided - validation happens here
         if tools is not None:
             self.tool_registry.process_tools(tools)
 

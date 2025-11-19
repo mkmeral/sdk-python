@@ -218,3 +218,76 @@ async def test_bidirectional_agent(agent_with_calculator, audio_generator, provi
             total_audio_bytes,
         )
         logger.info("=" * 60)
+
+
+
+@pytest.mark.asyncio
+async def test_bidi_agent_rejects_agent_only_tool():
+    """Test that BidiAgent rejects tools with Agent-only ToolContext.
+
+    This validates the tool compatibility validation system that prevents
+    BidiAgent from using tools that are only compatible with Agent.
+    """
+    from strands import ToolContext
+
+    # Define a tool that only works with Agent (uses ToolContext)
+    @tool(context=True)
+    def agent_only_tool(tool_context: ToolContext) -> dict:
+        """Tool that only works with Agent."""
+        return {"status": "success", "content": [{"text": f"Agent: {tool_context.agent.name}"}]}
+
+    # Attempt to create BidiAgent with Agent-only tool should fail
+    with pytest.raises(TypeError) as exc_info:
+        BidiAgent(tools=[agent_only_tool])
+
+    error_msg = str(exc_info.value)
+    assert "BidiAgent cannot use the following tools" in error_msg
+    assert "agent_only_tool" in error_msg
+    assert "BaseToolContext[Agent | BidiAgent]" in error_msg
+
+    logger.info("✓ BidiAgent correctly rejected Agent-only tool")
+    logger.info("error_message=<%s>", error_msg.split("\n")[0])
+
+
+@pytest.mark.asyncio
+async def test_bidi_agent_accepts_universal_tool():
+    """Test that BidiAgent accepts tools with BaseToolContext[Agent | BidiAgent].
+
+    This validates that tools explicitly marked as universal can be used
+    with both Agent and BidiAgent.
+    """
+    from strands import Agent, BaseToolContext
+
+    # Define a universal tool that works with both agents
+    @tool(context=True)
+    def universal_tool(tool_context: BaseToolContext[Agent | BidiAgent]) -> dict:
+        """Tool that works with both Agent and BidiAgent."""
+        state_value = tool_context.agent.state.get("test_key", "default")
+        return {"status": "success", "content": [{"text": f"State: {state_value}"}]}
+
+    # Creating BidiAgent with universal tool should succeed
+    agent = BidiAgent(tools=[universal_tool])
+    assert "universal_tool" in agent.tool_names
+
+    logger.info("✓ BidiAgent correctly accepted universal tool")
+
+
+@pytest.mark.asyncio
+async def test_bidi_agent_accepts_simple_tool():
+    """Test that BidiAgent accepts tools without context parameter.
+
+    This validates that simple tools (without context parameter) work
+    with all agent types automatically.
+    """
+
+    # Define a simple tool without context parameter
+    @tool
+    def simple_calculator(x: int, y: int) -> dict:
+        """Add two numbers."""
+        return {"status": "success", "content": [{"text": str(x + y)}]}
+
+    # Creating BidiAgent with simple tool should succeed
+    agent = BidiAgent(tools=[simple_calculator])
+    assert "simple_calculator" in agent.tool_names
+
+    logger.info("✓ BidiAgent correctly accepted simple tool without context")

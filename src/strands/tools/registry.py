@@ -41,6 +41,7 @@ class ToolRegistry:
         self.tool_config: Optional[Dict[str, Any]] = None
         self._tool_providers: List[ToolProvider] = []
         self._registry_id = str(uuid.uuid4())
+        self._agent_type: Optional[str] = None  # Track agent type for validation
 
     def process_tools(self, tools: List[Any]) -> List[str]:
         """Process tools list.
@@ -147,6 +148,11 @@ class ToolRegistry:
 
         for tool in tools:
             add_tool(tool)
+        
+        # Validate tool compatibility if agent type is set
+        if self._agent_type:
+            self._validate_tool_compatibility()
+        
         return tool_names
 
     def load_tool_from_filepath(self, tool_name: str, tool_path: str) -> None:
@@ -275,6 +281,46 @@ class ToolRegistry:
                 tool.tool_name,
                 list(self.registry.keys()),
                 list(self.dynamic_tools.keys()),
+            )
+
+    def set_agent_instance(self, agent: Any) -> None:
+        """Set the agent instance for tool compatibility validation.
+
+        Args:
+            agent: The agent instance (Agent or BidiAgent)
+        """
+        self._agent_type = agent
+
+    def _validate_tool_compatibility(self) -> None:
+        """Validate that all registered tools are compatible with the agent instance.
+
+        Raises:
+            TypeError: If any tool is incompatible with the agent type.
+        """
+        if not self._agent_type:
+            return  # No validation if agent not set
+
+        incompatible_tools = []
+
+        for tool_name, tool in self.registry.items():
+            if hasattr(tool, "get_supported_agent_type"):
+                supported_type = tool.get_supported_agent_type()
+                
+                # None means no context parameter (works with all)
+                if supported_type is None:
+                    continue
+
+                # Check if the agent instance is compatible with the type hint
+                if not isinstance(self._agent_type, supported_type):
+                    incompatible_tools.append(tool_name)
+
+        if incompatible_tools:
+            agent_type_name = self._agent_type.__class__.__name__
+            tool_list = "\n".join(f"  - {name}" for name in incompatible_tools)
+            raise TypeError(
+                f"{agent_type_name} cannot use the following tools:\n{tool_list}\n\n"
+                f"To fix, update tool signatures to include {agent_type_name} in the type parameter:\n"
+                f"  def my_tool(tool_context: BaseToolContext[Agent | BidiAgent]) -> ..."
             )
 
     def get_tools_dirs(self) -> List[Path]:

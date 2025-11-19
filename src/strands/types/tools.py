@@ -8,7 +8,7 @@ These types are modeled after the Bedrock API.
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable, Literal, Protocol, Union
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable, Generic, Literal, Protocol, TypeVar, Union
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -127,28 +127,56 @@ class ToolChoiceTool(TypedDict):
     name: str
 
 
-@dataclass
-class ToolContext(_Interruptible):
-    """Context object containing framework-provided data for decorated tools.
+# Type variable for generic agent type
+TAgent = TypeVar("TAgent")
 
-    This object provides access to framework-level information that may be useful
-    for tool implementations.
+
+@dataclass
+class BaseToolContext(Generic[TAgent]):
+    """Generic context object for tools that work with multiple agent types.
+
+    This is the public base class that tool developers should use when creating
+    tools that work with multiple agent types (e.g., Agent and BidiAgent).
 
     Attributes:
         tool_use: The complete ToolUse object containing tool invocation details.
-        agent: The Agent instance executing this tool, providing access to conversation history,
-               model configuration, and other agent state.
-        invocation_state: Caller-provided kwargs that were passed to the agent when it was invoked (agent(),
-                          agent.invoke_async(), etc.).
+        agent: The agent instance executing this tool (type depends on generic parameter).
+        invocation_state: Caller-provided kwargs that were passed to the agent when it was invoked.
+
+    Example:
+        ```python
+        from strands import tool, BaseToolContext, Agent
+        from strands.experimental.bidi import BidiAgent
+
+        # Universal tool supporting both agent types
+        @tool(context=True)
+        def my_tool(context: BaseToolContext[Agent | BidiAgent]) -> str:
+            return context.agent.state.get("key")
+        ```
 
     Note:
+        BaseToolContext is not interruptible. Only ToolContext (the Agent-specific
+        alias) supports interrupts. This is intentional to keep the base class simple.
+
+        TODO: Consider adding interrupt support to BaseToolContext in the future if
+        BidiAgent needs interrupt capabilities.
+
         This class is intended to be instantiated by the SDK. Direct construction by users
         is not supported and may break in future versions as new fields are added.
     """
 
     tool_use: ToolUse
-    agent: "Agent"
+    agent: TAgent
     invocation_state: dict[str, Any]
+
+
+@dataclass
+class _AgentToolContext(BaseToolContext["Agent"], _Interruptible):
+    """Agent-specific ToolContext with interrupt support.
+
+    This class extends BaseToolContext with interrupt capabilities for Agent.
+    It maintains backwards compatibility with existing tools that use ToolContext.
+    """
 
     def _interrupt_id(self, name: str) -> str:
         """Unique id for the interrupt.
@@ -160,6 +188,14 @@ class ToolContext(_Interruptible):
             Interrupt id.
         """
         return f"v1:tool_call:{self.tool_use['toolUseId']}:{uuid.uuid5(uuid.NAMESPACE_OID, name)}"
+
+
+# Backwards-compatible type alias - defaults to Agent-only with interrupt support
+ToolContext = _AgentToolContext
+"""Context object for Agent tools with interrupt support.
+
+For tools that work with multiple agent types, use BaseToolContext[Agent | BidiAgent] instead.
+"""
 
 
 # Individual ToolChoice type aliases

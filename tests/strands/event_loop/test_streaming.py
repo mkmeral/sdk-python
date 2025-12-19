@@ -757,6 +757,35 @@ async def test_process_stream_redacted(response, exp_events, agenerator, alist):
     assert non_typed_events == []
 
 
+@pytest.mark.asyncio
+async def test_handle_redact_user_content_message(agenerator, alist):
+    """Test that redactUserContentMessage is handled when redactAssistantContentMessage is not present."""
+    response = [
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockStart": {"start": {}}},
+        {"contentBlockDelta": {"delta": {"text": "Hello!"}}},
+        {"contentBlockStop": {}},
+        {"messageStop": {"stopReason": "guardrail_intervened"}},
+        {"redactContent": {"redactUserContentMessage": "USER_REDACTED"}},
+        {
+            "metadata": {
+                "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 1},
+                "metrics": {"latencyMs": 1},
+            }
+        },
+    ]
+
+    stream = strands.event_loop.streaming.process_stream(agenerator(response))
+    events = await alist(stream)
+
+    # Get the final event which contains the message
+    final_event = events[-1]
+    message = final_event["stop"][1]
+
+    # Verify that the message content was redacted with the user content message
+    assert message["content"] == [{"text": "USER_REDACTED"}]
+
+
 def _get_message_from_event(event: ModelStopReason) -> Message:
     return cast(Message, event["stop"][1])
 

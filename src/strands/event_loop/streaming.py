@@ -338,6 +338,8 @@ def handle_redact_content(event: RedactContentEvent, state: dict[str, Any]) -> N
     """
     if event.get("redactAssistantContentMessage") is not None:
         state["message"]["content"] = [{"text": event["redactAssistantContentMessage"]}]
+    elif event.get("redactUserContentMessage") is not None:
+        state["message"]["content"] = [{"text": event["redactUserContentMessage"]}]
 
 
 def extract_usage_metrics(event: MetadataEvent, time_to_first_byte_ms: int | None = None) -> tuple[Usage, Metrics]:

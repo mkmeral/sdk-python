@@ -50,7 +50,7 @@ class Tool(TypedDict):
     toolSpec: ToolSpec
 
 
-class ToolUse(TypedDict):
+class ToolUse(TypedDict, total=False):
     """A request from the model to use a specific tool with the provided input.
 
     Attributes:
@@ -58,11 +58,18 @@ class ToolUse(TypedDict):
             Can be any JSON-serializable type.
         name: The name of the tool to invoke.
         toolUseId: A unique identifier for this specific tool use request.
+        metadata: Model-specific data that needs to be preserved across conversation turns.
+            This is a flexible container for provider-specific metadata that doesn't fit
+            the standard schema. Examples include:
+            - Gemini thought signatures: {"thoughtSignature": "base64-encoded-string"}
+            - Provider-specific context tokens
+            Values should be JSON-serializable for session persistence.
     """
 
     input: Any
     name: str
     toolUseId: str
+    metadata: dict[str, Any]
 
 
 class ToolResultContent(TypedDict, total=False):

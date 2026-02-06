@@ -203,7 +203,7 @@ async def test_stream_request_with_reasoning(gemini_client, model, model_id):
                 {
                     "reasoningContent": {
                         "reasoningText": {
-                            "signature": "abc",
+                            "signature": "YWJj",  # base64 of "abc"
                             "text": "reasoning_text",
                         },
                     },
@@ -560,10 +560,11 @@ async def test_stream_response_reasoning(gemini_client, model, messages, agenera
     )
 
     tru_chunks = await alist(model.stream(messages))
+    # signature is base64 encoded: b"abc" -> "YWJj"
     exp_chunks = [
         {"messageStart": {"role": "assistant"}},
         {"contentBlockStart": {"start": {}}},
-        {"contentBlockDelta": {"delta": {"reasoningContent": {"signature": "abc", "text": "test reason"}}}},
+        {"contentBlockDelta": {"delta": {"reasoningContent": {"signature": "YWJj", "text": "test reason"}}}},
         {"contentBlockStop": {}},
         {"messageStop": {"stopReason": "end_turn"}},
         {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 2, "totalTokens": 3}, "metrics": {"latencyMs": 0}}},
@@ -619,10 +620,11 @@ async def test_stream_response_reasoning_and_text(gemini_client, model, messages
     )
 
     tru_chunks = await alist(model.stream(messages))
+    # signature is base64 encoded: b"sig1" -> "c2lnMQ=="
     exp_chunks = [
         {"messageStart": {"role": "assistant"}},
         {"contentBlockStart": {"start": {}}},
-        {"contentBlockDelta": {"delta": {"reasoningContent": {"signature": "sig1", "text": "thinking about math"}}}},
+        {"contentBlockDelta": {"delta": {"reasoningContent": {"signature": "c2lnMQ==", "text": "thinking about math"}}}},
         {"contentBlockStop": {}},
         {"contentBlockStart": {"start": {}}},
         {"contentBlockDelta": {"delta": {"text": "2 + 2 = 4"}}},
@@ -998,3 +1000,101 @@ def test_format_request_filters_location_source_document(model, caplog):
     assert len(formatted_content) == 1
     assert "text" in formatted_content[0]
     assert "Location sources are not supported by Gemini" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stream_request_with_tool_use_and_model_data(gemini_client, model, model_id):
+    """Test toolUse with metadata containing thoughtSignature is sent as function_call with thought_signature."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "toolUse": {
+                        "toolUseId": "c1",
+                        "name": "calculator",
+                        "input": {"expression": "2+2"},
+                        "metadata": {"thoughtSignature": "YWJj"},  # base64 of "abc"
+                    },
+                },
+            ],
+        },
+    ]
+    await anext(model.stream(messages))
+
+    exp_request = {
+        "config": {
+            "tools": [{"function_declarations": []}],
+        },
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "function_call": {
+                            "args": {"expression": "2+2"},
+                            "id": "c1",
+                            "name": "calculator",
+                        },
+                        "thought_signature": "YWJj",
+                    },
+                ],
+                "role": "model",
+            },
+        ],
+        "model": model_id,
+    }
+    gemini_client.aio.models.generate_content_stream.assert_called_with(**exp_request)
+
+
+@pytest.mark.asyncio
+async def test_stream_response_tool_use_with_thought_signature(gemini_client, model, messages, agenerator, alist):
+    """Test that tool use with thought_signature returns metadata containing thoughtSignature."""
+    gemini_client.aio.models.generate_content_stream.return_value = agenerator(
+        [
+            genai.types.GenerateContentResponse(
+                candidates=[
+                    genai.types.Candidate(
+                        content=genai.types.Content(
+                            parts=[
+                                genai.types.Part(
+                                    function_call=genai.types.FunctionCall(
+                                        args={"expression": "2+2"},
+                                        id="c1",
+                                        name="calculator",
+                                    ),
+                                    thought_signature=b"abc",
+                                ),
+                            ],
+                        ),
+                        finish_reason="STOP",
+                    ),
+                ],
+                usage_metadata=genai.types.GenerateContentResponseUsageMetadata(
+                    prompt_token_count=1,
+                    total_token_count=3,
+                ),
+            ),
+        ]
+    )
+
+    tru_chunks = await alist(model.stream(messages))
+    # thoughtSignature is base64 encoded: b"abc" -> "YWJj"
+    exp_chunks = [
+        {"messageStart": {"role": "assistant"}},
+        {
+            "contentBlockStart": {
+                "start": {
+                    "toolUse": {
+                        "name": "calculator",
+                        "toolUseId": "c1",
+                        "metadata": {"thoughtSignature": "YWJj"},
+                    }
+                }
+            }
+        },
+        {"contentBlockDelta": {"delta": {"toolUse": {"input": '{"expression": "2+2"}'}}}},
+        {"contentBlockStop": {}},
+        {"messageStop": {"stopReason": "tool_use"}},
+        {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 2, "totalTokens": 3}, "metrics": {"latencyMs": 0}}},
+    ]
+    assert tru_chunks == exp_chunks

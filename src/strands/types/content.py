@@ -6,13 +6,32 @@ SDK. These types are modeled after the Bedrock API.
 - Bedrock docs: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_Types_Amazon_Bedrock_Runtime.html
 """
 
-from typing import Literal
+from typing import Any, Literal
 
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from .citations import CitationsContentBlock
 from .media import DocumentContent, ImageContent, VideoContent
 from .tools import ToolResult, ToolUse
+
+
+# Type alias for model-specific data
+Metadata = dict[str, Any]
+"""A flexible container for model-specific data that doesn't fit the standard message schema.
+
+This type is used to store provider-specific metadata that needs to be preserved
+across conversation turns. Examples include:
+
+- Gemini thought signatures: {"thoughtSignature": "base64-encoded-string"}
+- Provider-specific tokens or context IDs
+- Custom metadata required for multi-turn conversations
+
+The data is stored as a dictionary to allow for different providers to use different
+key names without requiring schema changes. As common patterns emerge across providers,
+they can be "graduated" to properly typed fields.
+
+Values should be JSON-serializable to support session persistence and state management.
+"""
 
 
 class GuardContentText(TypedDict):
@@ -123,16 +142,20 @@ class DeltaContent(TypedDict, total=False):
     toolUse: dict[Literal["input"], str]
 
 
-class ContentBlockStartToolUse(TypedDict):
+class ContentBlockStartToolUse(TypedDict, total=False):
     """The start of a tool use block.
 
     Attributes:
         name: The name of the tool that the model is requesting to use.
         toolUseId: The ID for the tool request.
+        metadata: Model-specific data that needs to be preserved (e.g., Gemini thought signatures).
+            This is a flexible container for provider-specific metadata that doesn't fit
+            the standard schema but needs to be passed through the system.
     """
 
     name: str
     toolUseId: str
+    metadata: Metadata
 
 
 class ContentBlockStart(TypedDict, total=False):

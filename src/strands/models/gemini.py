@@ -3,6 +3,7 @@
 - Docs: https://ai.google.dev/api
 """
 
+import base64
 import json
 import logging
 import mimetypes
@@ -173,7 +174,8 @@ class GeminiModel(Model):
             return genai.types.Part(
                 text=content["reasoningContent"]["reasoningText"]["text"],
                 thought=True,
-                thought_signature=thought_signature.encode("utf-8") if thought_signature else None,
+                # Decode base64-encoded signature for Gemini API
+                thought_signature=base64.b64decode(thought_signature) if thought_signature else None,
             )
 
         if "text" in content:
@@ -204,12 +206,18 @@ class GeminiModel(Model):
         if "toolUse" in content:
             tool_use_id_to_name[content["toolUse"]["toolUseId"]] = content["toolUse"]["name"]
 
+            # Extract thought signature from metadata if present
+            model_data = content["toolUse"].get("metadata", {})
+            thought_signature = model_data.get("thoughtSignature")
+
             return genai.types.Part(
                 function_call=genai.types.FunctionCall(
                     args=content["toolUse"]["input"],
                     id=content["toolUse"]["toolUseId"],
                     name=content["toolUse"]["name"],
                 ),
+                # Decode base64-encoded thought signature for Gemini API
+                thought_signature=base64.b64decode(thought_signature) if thought_signature else None,
             )
 
         raise TypeError(f"content_type=<{next(iter(content))}> | unsupported type")
@@ -349,13 +357,20 @@ class GeminiModel(Model):
                         # Use Gemini's provided ID or generate one if missing
                         tool_use_id = function_call.id or f"tooluse_{secrets.token_urlsafe(16)}"
 
+                        tool_use_start: dict[str, Any] = {
+                            "name": function_call.name,
+                            "toolUseId": tool_use_id,
+                        }
+                        # Include thought signature in metadata if present
+                        if event["data"].thought_signature:
+                            tool_use_start["metadata"] = {
+                                "thoughtSignature": base64.b64encode(event["data"].thought_signature).decode("ascii")
+                            }
+
                         return {
                             "contentBlockStart": {
                                 "start": {
-                                    "toolUse": {
-                                        "name": function_call.name,
-                                        "toolUseId": tool_use_id,
-                                    },
+                                    "toolUse": tool_use_start,
                                 },
                             },
                         }
@@ -379,7 +394,11 @@ class GeminiModel(Model):
                                     "reasoningContent": {
                                         "text": event["data"].text,
                                         **(
-                                            {"signature": event["data"].thought_signature.decode("utf-8")}
+                                            {
+                                                "signature": base64.b64encode(
+                                                    event["data"].thought_signature
+                                                ).decode("ascii")
+                                            }
                                             if event["data"].thought_signature
                                             else {}
                                         ),

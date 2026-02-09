@@ -9,6 +9,7 @@ The Agent interface supports two complementary interaction patterns:
 2. Method-style for direct tool access: `agent.tool.tool_name(param1="value")`
 """
 
+import contextvars
 import logging
 import threading
 import warnings
@@ -67,6 +68,16 @@ from .conversation_manager import (
 from .state import AgentState
 
 logger = logging.getLogger(__name__)
+
+# ContextVar tracking which agent instances have an active invocation in the current context.
+# This is used to allow re-entrant invocations from the same logical call chain (e.g., when
+# SummarizingConversationManager calls back into the same agent for summarization during
+# context window overflow handling). Since run_async() propagates context via
+# contextvars.copy_context(), nested invocations on new threads can detect they originate
+# from the same logical flow and bypass the concurrency lock.
+_ACTIVE_AGENT_IDS: contextvars.ContextVar[frozenset[int]] = contextvars.ContextVar(
+    "strands_active_agent_ids", default=frozenset()
+)
 
 # TypeVar for generic structured output
 T = TypeVar("T", bound=BaseModel)
@@ -259,9 +270,11 @@ class Agent(AgentBase):
 
         self._interrupt_state = _InterruptState()
 
-        # Initialize lock for guarding concurrent invocations
-        # Using threading.Lock instead of asyncio.Lock because run_async() creates
-        # separate event loops in different threads, so asyncio.Lock wouldn't work
+        # Lock for guarding against truly concurrent invocations from different contexts.
+        # Re-entrant invocations from the same logical call chain (e.g., when
+        # SummarizingConversationManager calls back into this agent for summarization)
+        # are allowed via the _ACTIVE_AGENT_IDS ContextVar, which is propagated through
+        # run_async()'s contextvars.copy_context().
         self._invocation_lock = threading.Lock()
 
         # In the future, we'll have a RetryStrategy base class but until
@@ -622,14 +635,24 @@ class Agent(AgentBase):
                     yield event["data"]
             ```
         """
-        # Acquire lock to prevent concurrent invocations
-        # Using threading.Lock instead of asyncio.Lock because run_async() creates
-        # separate event loops in different threads
-        acquired = self._invocation_lock.acquire(blocking=False)
-        if not acquired:
-            raise ConcurrencyException(
-                "Agent is already processing a request. Concurrent invocations are not supported."
-            )
+        # Check if this is a re-entrant invocation from the same logical call chain
+        # (e.g., SummarizingConversationManager calling back into this agent for summarization).
+        # The _ACTIVE_AGENT_IDS ContextVar is propagated through run_async()'s
+        # contextvars.copy_context(), so nested invocations on new threads can detect
+        # they originate from the same logical flow.
+        active_ids = _ACTIVE_AGENT_IDS.get()
+        is_reentrant = id(self) in active_ids
+
+        if not is_reentrant:
+            # Not a re-entrant call — acquire lock to prevent truly concurrent invocations.
+            acquired = self._invocation_lock.acquire(blocking=False)
+            if not acquired:
+                raise ConcurrencyException(
+                    "Agent is already processing a request. Concurrent invocations are not supported."
+                )
+
+        # Mark this agent as having an active invocation in the current context
+        context_token = _ACTIVE_AGENT_IDS.set(active_ids | {id(self)})
 
         try:
             self._interrupt_state.resume(prompt)
@@ -678,7 +701,9 @@ class Agent(AgentBase):
                     raise
 
         finally:
-            self._invocation_lock.release()
+            _ACTIVE_AGENT_IDS.reset(context_token)
+            if not is_reentrant:
+                self._invocation_lock.release()
 
     async def _run_loop(
         self,

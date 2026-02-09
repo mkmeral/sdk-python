@@ -1,4 +1,4 @@
-from typing import cast
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -637,3 +637,93 @@ def test_summarizing_conversation_manager_generate_summary_with_tools(mock_regis
     summarizing_manager._generate_summary(messages, agent)
 
     mock_registry.register_tool.assert_not_called()
+
+
+class ContextOverflowThenSummaryModel(MockedModelProvider):
+    """Model that raises ContextWindowOverflowException on first call, then returns responses.
+
+    This simulates the scenario where:
+    1. First stream call: model rejects input (context too large)
+    2. Second stream call: agent re-enters for summarization (returns summary)
+    3. Third stream call: agent retries after context reduction (returns final response)
+    """
+
+    def __init__(self):
+        super().__init__(
+            [
+                # Response for summarization (second call, re-entrant)
+                {"role": "assistant", "content": [{"text": "Summary of conversation."}]},
+                # Response for retry after context reduction (third call)
+                {"role": "assistant", "content": [{"text": "Final response after summarization."}]},
+            ]
+        )
+        self.call_count = 0
+
+    async def stream(
+        self,
+        messages: Messages,
+        tool_specs: Any = None,
+        system_prompt: Any = None,
+        tool_choice: Any = None,
+        **kwargs: Any,
+    ):
+        self.call_count += 1
+        if self.call_count == 1:
+            # First call: simulate context window overflow
+            raise ContextWindowOverflowException("Input is too long for requested model")
+        # Subsequent calls: return pre-defined responses via parent
+        async for event in super().stream(messages, tool_specs, system_prompt, tool_choice, **kwargs):
+            yield event
+
+
+def test_summarizing_conversation_manager_reentrant_lock_no_concurrency_exception():
+    """Test that SummarizingConversationManager works when reusing the same agent for summarization.
+
+    This is a regression test for the bug where using SummarizingConversationManager without
+    a separate summarization_agent would crash with ConcurrencyException because the agent's
+    invocation lock prevented re-entrant invocations.
+
+    The fix uses a ContextVar (_ACTIVE_AGENT_IDS) to detect re-entrant calls from the same
+    logical call chain (propagated through run_async's contextvars.copy_context()) and
+    bypass the concurrency lock for those calls:
+        stream_async (acquires lock, sets ContextVar)
+          -> ContextWindowOverflowException
+          -> reduce_context -> _generate_summary -> agent("summarize...")
+          -> run_async (copies context) -> stream_async (sees ContextVar, skips lock)
+    """
+    model = ContextOverflowThenSummaryModel()
+
+    manager = SummarizingConversationManager(
+        summary_ratio=0.5,
+        preserve_recent_messages=2,
+    )
+
+    agent = Agent(
+        model=model,
+        conversation_manager=manager,
+        callback_handler=None,
+    )
+
+    # Populate with enough messages to allow summarization
+    agent.messages = [
+        {"role": "user", "content": [{"text": "Hello"}]},
+        {"role": "assistant", "content": [{"text": "Hi there!"}]},
+        {"role": "user", "content": [{"text": "Tell me about Python"}]},
+        {"role": "assistant", "content": [{"text": "Python is a programming language."}]},
+        {"role": "user", "content": [{"text": "What about JavaScript?"}]},
+        {"role": "assistant", "content": [{"text": "JavaScript is also a programming language."}]},
+    ]
+
+    # This should NOT raise ConcurrencyException.
+    # Before the fix, this would fail because:
+    # 1. agent("test") acquires the lock
+    # 2. model raises ContextWindowOverflowException
+    # 3. SummarizingConversationManager.reduce_context() calls _generate_summary()
+    # 4. _generate_summary() calls agent("Please summarize...") which tries to acquire the lock again
+    # 5. The nested call runs on a new thread (via run_async), so it can't re-acquire the lock
+    # After the fix, the ContextVar propagated through run_async's context copy allows the
+    # nested call to detect it's from the same logical flow and bypass the lock.
+    result = agent("What about TypeScript?")
+
+    assert result is not None
+    assert model.call_count == 3  # overflow + summarization + retry

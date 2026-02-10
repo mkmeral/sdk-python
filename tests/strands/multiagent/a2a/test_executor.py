@@ -1116,3 +1116,74 @@ async def test_a2a_compliant_mode_uses_add_artifact(mock_strands_agent):
     assert mock_updater.add_artifact.call_args[1]["artifact_id"] == "artifact-123"
     assert mock_updater.add_artifact.call_args[1]["append"] is False
     mock_updater.update_status.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a2a_compliant_final_chunk_after_streaming_has_non_empty_parts(mock_strands_agent):
+    """Test that final artifact chunk after streaming contains at least one part (A2A spec compliance).
+
+    The A2A spec requires parts to contain at least one element. When streaming data
+    was already sent (_is_first_chunk=False), the final chunk must still include a
+    non-empty parts array.
+    """
+    executor = StrandsA2AExecutor(mock_strands_agent, enable_a2a_compliant_streaming=True)
+    executor._current_artifact_id = "artifact-456"
+    executor._is_first_chunk = False  # Data was already streamed
+
+    mock_updater = MagicMock()
+    mock_updater.add_artifact = AsyncMock()
+    mock_updater.complete = AsyncMock()
+
+    await executor._handle_agent_result(MagicMock(spec=SAAgentResult), mock_updater)
+
+    # Verify the parts list is non-empty
+    call_args = mock_updater.add_artifact.call_args[0][0]
+    assert len(call_args) >= 1, "Parts array must contain at least one part per A2A spec"
+    assert call_args[0].root.text == ""
+    assert mock_updater.add_artifact.call_args[1]["last_chunk"] is True
+    assert mock_updater.add_artifact.call_args[1]["append"] is True
+
+
+@pytest.mark.asyncio
+async def test_a2a_compliant_first_chunk_with_empty_result_has_non_empty_parts(mock_strands_agent):
+    """Test that first chunk with empty/None result still has non-empty parts (A2A spec compliance).
+
+    When no streaming data was sent and the result is None/empty, the final artifact
+    must still include at least one part.
+    """
+    executor = StrandsA2AExecutor(mock_strands_agent, enable_a2a_compliant_streaming=True)
+    executor._current_artifact_id = "artifact-789"
+    executor._is_first_chunk = True  # No data was streamed
+
+    mock_updater = MagicMock()
+    mock_updater.add_artifact = AsyncMock()
+    mock_updater.complete = AsyncMock()
+
+    # Test with None result
+    await executor._handle_agent_result(None, mock_updater)
+
+    call_args = mock_updater.add_artifact.call_args[0][0]
+    assert len(call_args) >= 1, "Parts array must contain at least one part per A2A spec"
+    assert call_args[0].root.text == ""
+    assert mock_updater.add_artifact.call_args[1]["last_chunk"] is True
+
+
+@pytest.mark.asyncio
+async def test_a2a_compliant_first_chunk_with_content_has_correct_parts(mock_strands_agent):
+    """Test that first chunk with actual content includes it in parts."""
+    executor = StrandsA2AExecutor(mock_strands_agent, enable_a2a_compliant_streaming=True)
+    executor._current_artifact_id = "artifact-content"
+    executor._is_first_chunk = True
+
+    mock_updater = MagicMock()
+    mock_updater.add_artifact = AsyncMock()
+    mock_updater.complete = AsyncMock()
+
+    mock_result = MagicMock(spec=SAAgentResult)
+    mock_result.__str__ = MagicMock(return_value="Final response text")
+
+    await executor._handle_agent_result(mock_result, mock_updater)
+
+    call_args = mock_updater.add_artifact.call_args[0][0]
+    assert len(call_args) == 1
+    assert call_args[0].root.text == "Final response text"

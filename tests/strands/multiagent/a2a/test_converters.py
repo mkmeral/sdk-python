@@ -203,3 +203,74 @@ def test_convert_response_handles_missing_data():
     mock_task.artifacts = [mock_artifact]
     result = convert_response_to_agent_result((mock_task, None))
     assert len(result.message["content"]) == 0
+
+
+def test_convert_task_status_update_with_none_message_falls_back_to_artifacts():
+    """Test that TaskStatusUpdateEvent with None message falls back to task artifacts.
+
+    When the stream ends with a TaskStatusUpdateEvent whose status.message is None
+    (e.g., state=completed with no message), the converter should fall back to
+    extracting content from task.artifacts instead of returning empty content.
+    """
+    # Setup task with artifacts containing text
+    mock_task = MagicMock()
+    mock_part = MagicMock()
+    mock_part.root.text = "Artifact response text"
+    mock_artifact = MagicMock()
+    mock_artifact.parts = [mock_part]
+    mock_task.artifacts = [mock_artifact]
+
+    # Setup TaskStatusUpdateEvent with status.message = None (completed, no message)
+    mock_event = MagicMock(spec=TaskStatusUpdateEvent)
+    mock_status = MagicMock()
+    mock_status.message = None
+    mock_event.status = mock_status
+
+    result = convert_response_to_agent_result((mock_task, mock_event))
+
+    assert isinstance(result, AgentResult)
+    assert len(result.message["content"]) == 1
+    assert result.message["content"][0]["text"] == "Artifact response text"
+
+
+def test_convert_task_status_update_with_none_message_and_multiple_artifacts():
+    """Test fallback to artifacts with multiple artifacts and parts."""
+    mock_task = MagicMock()
+
+    mock_part1 = MagicMock()
+    mock_part1.root.text = "First artifact"
+    mock_artifact1 = MagicMock()
+    mock_artifact1.parts = [mock_part1]
+
+    mock_part2 = MagicMock()
+    mock_part2.root.text = "Second artifact"
+    mock_artifact2 = MagicMock()
+    mock_artifact2.parts = [mock_part2]
+
+    mock_task.artifacts = [mock_artifact1, mock_artifact2]
+
+    mock_event = MagicMock(spec=TaskStatusUpdateEvent)
+    mock_status = MagicMock()
+    mock_status.message = None
+    mock_event.status = mock_status
+
+    result = convert_response_to_agent_result((mock_task, mock_event))
+
+    assert len(result.message["content"]) == 2
+    assert result.message["content"][0]["text"] == "First artifact"
+    assert result.message["content"][1]["text"] == "Second artifact"
+
+
+def test_convert_task_status_update_with_none_message_and_no_artifacts():
+    """Test fallback when status.message is None and task has no artifacts."""
+    mock_task = MagicMock()
+    mock_task.artifacts = None
+
+    mock_event = MagicMock(spec=TaskStatusUpdateEvent)
+    mock_status = MagicMock()
+    mock_status.message = None
+    mock_event.status = mock_status
+
+    result = convert_response_to_agent_result((mock_task, mock_event))
+
+    assert len(result.message["content"]) == 0

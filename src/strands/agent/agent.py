@@ -10,6 +10,7 @@ The Agent interface supports two complementary interaction patterns:
 """
 
 import logging
+import re
 import threading
 import warnings
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
@@ -57,10 +58,18 @@ from ..tools.executors._executor import ToolExecutor
 from ..tools.registry import ToolRegistry
 from ..tools.structured_output._structured_output_context import StructuredOutputContext
 from ..tools.watcher import ToolWatcher
-from ..types._events import AgentResultEvent, EventLoopStopEvent, InitEventLoopEvent, ModelStreamChunkEvent, TypedEvent
+from ..types._events import (
+    AgentResultEvent,
+    EventLoopStopEvent,
+    InitEventLoopEvent,
+    ModelStreamChunkEvent,
+    ToolResultEvent,
+    TypedEvent,
+)
 from ..types.agent import AgentInput, ConcurrentInvocationMode
 from ..types.content import ContentBlock, Message, Messages, SystemContentBlock
 from ..types.exceptions import ConcurrencyException, ContextWindowOverflowException
+from ..types.tools import AgentTool, ToolGenerator, ToolResult, ToolSpec, ToolUse
 from ..types.traces import AttributeValue
 from .agent_result import AgentResult
 from .base import AgentBase
@@ -95,7 +104,11 @@ _DEFAULT_AGENT_NAME = "Strands Agents"
 _DEFAULT_AGENT_ID = "default"
 
 
-class Agent(AgentBase):
+_TOOL_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_-]")
+"""Pattern matching characters that are not valid in tool names."""
+
+
+class Agent(AgentBase, AgentTool):
     """Core Agent implementation.
 
     An agent orchestrates the following workflow:
@@ -106,6 +119,11 @@ class Agent(AgentBase):
     4. Executes those tools and receives results
     5. Continues reasoning with the new information
     6. Produces a final response
+
+    Agent also implements AgentTool, so it can be passed directly as a tool to another agent:
+
+        researcher = Agent(name="researcher", description="Researches topics")
+        manager = Agent(tools=[researcher])
     """
 
     # For backwards compatibility
@@ -205,6 +223,8 @@ class Agent(AgentBase):
         Raises:
             ValueError: If agent id contains path separators.
         """
+        AgentTool.__init__(self)
+
         self.model = BedrockModel() if not model else BedrockModel(model_id=model) if isinstance(model, str) else model
         self.messages = messages if messages is not None else []
         # initializing self._system_prompt for backwards compatibility
@@ -380,6 +400,78 @@ class Agent(AgentBase):
         """
         all_tools = self.tool_registry.get_all_tools_config()
         return list(all_tools.keys())
+
+    # AgentTool interface implementation
+    # These properties allow an Agent to be passed directly as a tool to another agent.
+
+    @property
+    def tool_name(self) -> str:
+        """Tool name derived from the agent name.
+
+        Sanitizes the agent name to conform to tool name constraints (alphanumeric, underscores, hyphens, max 64
+        chars).
+
+        Returns:
+            A valid tool name.
+        """
+        sanitized = _TOOL_NAME_PATTERN.sub("_", self.name)
+        return sanitized[:64]
+
+    @property
+    def tool_spec(self) -> ToolSpec:
+        """Tool specification for invoking this agent as a tool.
+
+        Returns:
+            A ToolSpec with a single required "prompt" parameter.
+        """
+        return ToolSpec(
+            name=self.tool_name,
+            description=self.description or f"Agent: {self.name}",
+            inputSchema={
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "The prompt to send to the agent",
+                        },
+                    },
+                    "required": ["prompt"],
+                },
+            },
+        )
+
+    @property
+    def tool_type(self) -> str:
+        """Identifies this as an agent-based tool.
+
+        Returns:
+            "agent".
+        """
+        return "agent"
+
+    async def stream(self, tool_use: ToolUse, invocation_state: dict[str, Any], **kwargs: Any) -> ToolGenerator:
+        """Invoke this agent as a tool and stream the result.
+
+        Args:
+            tool_use: The tool use request containing the prompt in input.
+            invocation_state: Context for the tool invocation.
+            **kwargs: Additional keyword arguments.
+
+        Yields:
+            ToolResultEvent with the agent's response.
+        """
+        prompt = tool_use["input"].get("prompt", "")
+        result = await self.invoke_async(prompt)
+        text = str(result) if result.message else ""
+
+        yield ToolResultEvent(
+            ToolResult(
+                toolUseId=tool_use["toolUseId"],
+                status="success",
+                content=[{"text": text}],
+            )
+        )
 
     def __call__(
         self,

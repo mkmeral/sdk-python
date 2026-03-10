@@ -14,18 +14,19 @@ import pytest
 from pydantic import BaseModel
 
 import strands
-from strands import Agent, ToolContext
+from strands import Agent, Plugin, ToolContext
 from strands.agent import AgentResult
 from strands.agent.conversation_manager.null_conversation_manager import NullConversationManager
 from strands.agent.conversation_manager.sliding_window_conversation_manager import SlidingWindowConversationManager
 from strands.agent.state import AgentState
 from strands.handlers.callback_handler import PrintingCallbackHandler, null_callback_handler
-from strands.hooks import BeforeToolCallEvent
+from strands.hooks import BeforeInvocationEvent, BeforeModelCallEvent, BeforeToolCallEvent
 from strands.interrupt import Interrupt
 from strands.models.bedrock import DEFAULT_BEDROCK_MODEL_ID, BedrockModel
 from strands.session.repository_session_manager import RepositorySessionManager
 from strands.telemetry.tracer import serialize
 from strands.types._events import EventLoopStopEvent, ModelStreamEvent
+from strands.types.agent import ConcurrentInvocationMode
 from strands.types.content import Messages
 from strands.types.exceptions import ConcurrencyException, ContextWindowOverflowException, EventLoopException
 from strands.types.session import Session, SessionAgent, SessionMessage, SessionType
@@ -620,7 +621,7 @@ def test_agent__call__retry_with_overwritten_tool(mock_model, agent, tool, agene
                         },
                     },
                 },
-                {"contentBlockDelta": {"delta": {"toolUse": {"input": '{"random_string": "abcdEfghI123"}'}}}},
+                {"contentBlockDelta": {"delta": {"toolUse": {"input": '{"random_string": "' + "X" * 500 + '"}'}}}},
                 {"contentBlockStop": {}},
                 {"messageStop": {"stopReason": "tool_use"}},
             ]
@@ -634,12 +635,14 @@ def test_agent__call__retry_with_overwritten_tool(mock_model, agent, tool, agene
 
     agent("test message")
 
+    large_input = "X" * 500
+    truncated_text = large_input[:200] + "...\n\n... [truncated: 100 chars removed] ...\n\n..." + large_input[-200:]
     expected_messages = [
         {"role": "user", "content": [{"text": "test message"}]},
         {
             "role": "assistant",
             "content": [
-                {"toolUse": {"toolUseId": "t1", "name": "tool_decorated", "input": {"random_string": "abcdEfghI123"}}}
+                {"toolUse": {"toolUseId": "t1", "name": "tool_decorated", "input": {"random_string": large_input}}}
             ],
         },
         {
@@ -648,8 +651,8 @@ def test_agent__call__retry_with_overwritten_tool(mock_model, agent, tool, agene
                 {
                     "toolResult": {
                         "toolUseId": "t1",
-                        "status": "error",
-                        "content": [{"text": "The tool result was too large!"}],
+                        "status": "success",
+                        "content": [{"text": truncated_text}],
                     }
                 }
             ],
@@ -2231,20 +2234,17 @@ def test_agent_concurrent_call_raises_exception():
             {"role": "assistant", "content": [{"text": "world"}]},
         ]
     )
-    agent = Agent(model=model)
+    agent = Agent(model=model, concurrent_invocation_mode="throw")
 
     results = []
     errors = []
-    lock = threading.Lock()
 
     def invoke():
         try:
             result = agent("test")
-            with lock:
-                results.append(result)
+            results.append(result)
         except ConcurrencyException as e:
-            with lock:
-                errors.append(e)
+            errors.append(e)
 
     # Start first thread and wait for it to begin streaming
     t1 = threading.Thread(target=invoke)
@@ -2282,7 +2282,7 @@ def test_agent_concurrent_structured_output_raises_exception():
             {"role": "assistant", "content": [{"text": "response2"}]},
         ],
     )
-    agent = Agent(model=model)
+    agent = Agent(model=model, concurrent_invocation_mode="throw")
 
     results = []
     errors = []
@@ -2318,6 +2318,83 @@ def test_agent_concurrent_structured_output_raises_exception():
     assert len(results) == 1, f"Expected 1 success, got {len(results)}"
     assert len(errors) == 1, f"Expected 1 error, got {len(errors)}"
     assert "concurrent" in str(errors[0]).lower() and "invocation" in str(errors[0]).lower()
+
+
+def test_agent_concurrent_call_succeeds_with_unsafe_reentrant_mode():
+    """Test that concurrent __call__() calls succeed when concurrent_invocation_mode is 'unsafe_reentrant'."""
+    model = SyncEventMockedModel(
+        [
+            {"role": "assistant", "content": [{"text": "hello"}]},
+            {"role": "assistant", "content": [{"text": "world"}]},
+        ]
+    )
+    agent = Agent(model=model, concurrent_invocation_mode="unsafe_reentrant")
+
+    results = []
+    errors = []
+    lock = threading.Lock()
+
+    def invoke():
+        try:
+            result = agent("test")
+            with lock:
+                results.append(result)
+        except ConcurrencyException as e:
+            with lock:
+                errors.append(e)
+
+    # Start first thread and wait for it to begin streaming
+    t1 = threading.Thread(target=invoke)
+    t1.start()
+    model.started_event.wait()  # Wait until first thread is in the model.stream()
+
+    # Start second thread while first is still running
+    t2 = threading.Thread(target=invoke)
+    t2.start()
+
+    # Let both threads proceed
+    model.proceed_event.set()
+    t1.join()
+    t2.join()
+
+    # Both should succeed, no ConcurrencyException raised
+    assert len(errors) == 0, f"Expected 0 errors, got {len(errors)}: {errors}"
+    assert len(results) == 2, f"Expected 2 successes, got {len(results)}"
+
+
+def test_agent_concurrent_invocation_mode_default_is_throw():
+    """Test that the default concurrent_invocation_mode is 'throw'."""
+    model = MockedModelProvider([{"role": "assistant", "content": [{"text": "hello"}]}])
+    agent = Agent(model=model)
+
+    # Verify the default mode
+    assert agent._concurrent_invocation_mode == "throw"
+
+
+def test_agent_concurrent_invocation_mode_stores_value():
+    """Test that concurrent_invocation_mode is stored correctly as instance variable."""
+    model = MockedModelProvider([{"role": "assistant", "content": [{"text": "hello"}]}])
+
+    agent_throw = Agent(model=model, concurrent_invocation_mode="throw")
+    assert agent_throw._concurrent_invocation_mode == "throw"
+
+    agent_reentrant = Agent(model=model, concurrent_invocation_mode="unsafe_reentrant")
+    assert agent_reentrant._concurrent_invocation_mode == "unsafe_reentrant"
+
+
+def test_agent_concurrent_invocation_mode_accepts_enum():
+    """Test that concurrent_invocation_mode accepts enum values as well as strings."""
+
+    model = MockedModelProvider([{"role": "assistant", "content": [{"text": "hello"}]}])
+
+    # Using enum values
+    agent_throw = Agent(model=model, concurrent_invocation_mode=ConcurrentInvocationMode.THROW)
+    assert agent_throw._concurrent_invocation_mode == "throw"
+    assert agent_throw._concurrent_invocation_mode == ConcurrentInvocationMode.THROW
+
+    agent_reentrant = Agent(model=model, concurrent_invocation_mode=ConcurrentInvocationMode.UNSAFE_REENTRANT)
+    assert agent_reentrant._concurrent_invocation_mode == "unsafe_reentrant"
+    assert agent_reentrant._concurrent_invocation_mode == ConcurrentInvocationMode.UNSAFE_REENTRANT
 
 
 @pytest.mark.asyncio
@@ -2475,3 +2552,150 @@ def test_agent_direct_tool_call_during_invocation_succeeds_with_record_false(too
         ],
         "role": "user",
     }
+
+
+def test_agent_add_hook_registers_callback():
+    """Test that add_hook registers a callback with the hooks registry."""
+    agent = Agent(model=MockedModelProvider([{"role": "assistant", "content": [{"text": "response"}]}]))
+    callback = unittest.mock.Mock()
+
+    agent.add_hook(callback, BeforeModelCallEvent)
+
+    # Verify callback was registered by checking it gets invoked
+    agent("test prompt")
+    callback.assert_called_once()
+    # Verify it was called with the correct event type
+    call_args = callback.call_args[0]
+    assert isinstance(call_args[0], BeforeModelCallEvent)
+
+
+def test_agent_add_hook_delegates_to_hooks_add_callback():
+    """Test that add_hook delegates to self.hooks.add_callback."""
+    agent = Agent(model=MockedModelProvider([{"role": "assistant", "content": [{"text": "response"}]}]))
+    callback = unittest.mock.Mock()
+
+    # Spy on the hooks.add_callback method
+    with unittest.mock.patch.object(agent.hooks, "add_callback") as mock_add_callback:
+        agent.add_hook(callback, BeforeInvocationEvent)
+        mock_add_callback.assert_called_once_with(BeforeInvocationEvent, callback)
+
+
+@pytest.mark.asyncio
+async def test_agent_add_hook_works_with_async_callback():
+    """Test that add_hook works with async callbacks."""
+
+    agent = Agent(model=MockedModelProvider([{"role": "assistant", "content": [{"text": "response"}]}]))
+    async_callback = unittest.mock.AsyncMock()
+
+    agent.add_hook(async_callback, BeforeModelCallEvent)
+
+    # Use stream_async to invoke the agent with async support
+    _ = [event async for event in agent.stream_async("test prompt")]
+    async_callback.assert_called_once()
+    # Verify it was called with the correct event type
+    call_args = async_callback.call_args[0]
+    assert isinstance(call_args[0], BeforeModelCallEvent)
+
+
+def test_agent_add_hook_infers_event_type_from_callback():
+    """Test that add_hook infers event type from callback type hint."""
+    agent = Agent(model=MockedModelProvider([{"role": "assistant", "content": [{"text": "response"}]}]))
+    callback_invoked = []
+
+    def typed_callback(event: BeforeModelCallEvent) -> None:
+        callback_invoked.append(event)
+
+    agent.add_hook(typed_callback)
+    agent("test prompt")
+
+    assert len(callback_invoked) == 1
+    assert isinstance(callback_invoked[0], BeforeModelCallEvent)
+
+
+def test_agent_add_hook_raises_error_when_no_type_hint():
+    """Test that add_hook raises error when event type cannot be inferred."""
+    agent = Agent(model=MockedModelProvider([{"role": "assistant", "content": [{"text": "response"}]}]))
+
+    def untyped_callback(event):
+        pass
+
+    with pytest.raises(ValueError, match="cannot infer event type"):
+        agent.add_hook(untyped_callback)
+
+
+def test_agent_plugins_sync_initialization():
+    """Test that plugins with sync init_agent are initialized correctly."""
+    plugin_mock = unittest.mock.Mock()
+    plugin_mock.name = "test-plugin"
+    plugin_mock.hooks = []
+    plugin_mock.tools = []
+    plugin_mock.init_agent = unittest.mock.Mock()
+
+    agent = Agent(
+        model=MockedModelProvider([{"role": "assistant", "content": [{"text": "response"}]}]),
+        plugins=[plugin_mock],
+    )
+
+    plugin_mock.init_agent.assert_called_once_with(agent)
+
+
+def test_agent_plugins_async_initialization():
+    """Test that plugins with async init_agent are initialized correctly."""
+    plugin_mock = unittest.mock.Mock()
+    plugin_mock.name = "async-plugin"
+    plugin_mock.hooks = []
+    plugin_mock.tools = []
+    plugin_mock.init_agent = unittest.mock.AsyncMock()
+
+    agent = Agent(
+        model=MockedModelProvider([{"role": "assistant", "content": [{"text": "response"}]}]),
+        plugins=[plugin_mock],
+    )
+
+    plugin_mock.init_agent.assert_called_once_with(agent)
+
+
+def test_agent_plugins_multiple_in_order():
+    """Test that multiple plugins are initialized in order."""
+    call_order = []
+
+    plugin1 = unittest.mock.Mock()
+    plugin1.name = "plugin1"
+    plugin1.hooks = []
+    plugin1.tools = []
+    plugin1.init_agent = unittest.mock.Mock(side_effect=lambda agent: call_order.append("plugin1"))
+
+    plugin2 = unittest.mock.Mock()
+    plugin2.name = "plugin2"
+    plugin2.hooks = []
+    plugin2.tools = []
+    plugin2.init_agent = unittest.mock.Mock(side_effect=lambda agent: call_order.append("plugin2"))
+
+    Agent(
+        model=MockedModelProvider([{"role": "assistant", "content": [{"text": "response"}]}]),
+        plugins=[plugin1, plugin2],
+    )
+
+    assert call_order == ["plugin1", "plugin2"]
+
+
+def test_agent_plugins_can_register_hooks():
+    """Test that plugins can register hooks during initialization."""
+    hook_called = []
+
+    class TestPlugin(Plugin):
+        name = "hook-plugin"
+
+        def init_agent(self, agent):
+            def hook_callback(event: BeforeModelCallEvent):
+                hook_called.append(True)
+
+            agent.add_hook(hook_callback)
+
+    agent = Agent(
+        model=MockedModelProvider([{"role": "assistant", "content": [{"text": "response"}]}]),
+        plugins=[TestPlugin()],
+    )
+
+    agent("test")
+    assert len(hook_called) == 1

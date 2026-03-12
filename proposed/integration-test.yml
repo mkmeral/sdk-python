@@ -1,0 +1,263 @@
+name: Secure Integration test
+
+on:
+  pull_request_target:
+    branches: [main]
+  merge_group: # Run tests in merge queue
+    types: [checks_requested]
+
+jobs:
+  authorization-check:
+    name: Check access
+    permissions: read-all
+    runs-on: ubuntu-latest
+    outputs:
+      approval-env: ${{ steps.auth.outputs.approval-env }}
+    steps:
+      - name: Check Authorization
+        id: auth
+        uses: strands-agents/devtools/authorization-check@main
+        with:
+          skip-check: ${{ github.event_name == 'merge_group' }}
+          username: ${{ github.event.pull_request.user.login || 'invalid' }}
+          allowed-roles: 'maintain,triage,write,admin'
+
+  detect-changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      contents: read
+    outputs:
+      test-matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has-tests: ${{ steps.set-matrix.outputs.has-tests }}
+    steps:
+      - name: Detect changed paths
+        if: github.event_name != 'merge_group'
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            run-all:
+              - 'src/strands/types/**'
+              - 'src/strands/handlers/**'
+              - 'src/strands/telemetry/**'
+              - '.github/workflows/integration-test.yml'
+              - 'tests_integ/**'
+              - 'pyproject.toml'
+            models:
+              - 'src/strands/models/**'
+            bedrock-specific:
+              - 'src/strands/models/bedrock.py'
+            mcp:
+              - 'src/strands/tools/mcp/**'
+            tools:
+              - 'src/strands/tools/**'
+              - '!src/strands/tools/mcp/**'
+            multiagent:
+              - 'src/strands/multiagent/**'
+            agent-core:
+              - 'src/strands/agent/**'
+              - 'src/strands/event_loop/**'
+              - 'src/strands/__init__.py'
+              - 'src/strands/interrupt.py'
+              - 'src/strands/_async.py'
+            hooks:
+              - 'src/strands/hooks/**'
+              - 'src/strands/plugins/**'
+            session:
+              - 'src/strands/session/**'
+            bidi:
+              - 'src/strands/experimental/bidi/**'
+            steering:
+              - 'src/strands/experimental/steering/**'
+              - 'src/strands/vended_plugins/steering/**'
+              - 'src/strands/vended_plugins/skills/**'
+
+      - name: Build test matrix
+        id: set-matrix
+        env:
+          IS_MERGE_GROUP: ${{ github.event_name == 'merge_group' }}
+          FILTER_RUN_ALL: ${{ steps.filter.outputs.run-all }}
+          FILTER_MODELS: ${{ steps.filter.outputs.models }}
+          FILTER_BEDROCK: ${{ steps.filter.outputs.bedrock-specific }}
+          FILTER_MCP: ${{ steps.filter.outputs.mcp }}
+          FILTER_TOOLS: ${{ steps.filter.outputs.tools }}
+          FILTER_MULTIAGENT: ${{ steps.filter.outputs.multiagent }}
+          FILTER_AGENT_CORE: ${{ steps.filter.outputs.agent-core }}
+          FILTER_HOOKS: ${{ steps.filter.outputs.hooks }}
+          FILTER_SESSION: ${{ steps.filter.outputs.session }}
+          FILTER_BIDI: ${{ steps.filter.outputs.bidi }}
+          FILTER_STEERING: ${{ steps.filter.outputs.steering }}
+        run: |
+          # Build a JSON matrix of test groups to run based on changed paths.
+          # Each group maps source directories to the relevant integration tests.
+          groups=()
+
+          add_group() {
+            groups+=("{\"group\":\"$1\",\"test-paths\":\"$2\"}")
+          }
+
+          if [ "$IS_MERGE_GROUP" = "true" ] || [ "$FILTER_RUN_ALL" = "true" ]; then
+            # Run ALL tests for merge queue or when foundational code changes
+            # (types, handlers, telemetry, CI config, test infra, pyproject.toml)
+            add_group "all" "tests_integ"
+          else
+            # Run only the test groups whose source paths were modified
+
+            # src/strands/models/** → tests_integ/models/
+            if [ "$FILTER_MODELS" = "true" ]; then
+              add_group "models" "tests_integ/models/"
+            fi
+
+            # src/strands/models/bedrock.py → bedrock-specific root-level tests
+            if [ "$FILTER_BEDROCK" = "true" ]; then
+              add_group "bedrock-specific" "tests_integ/test_bedrock_cache_point.py tests_integ/test_bedrock_guardrails.py tests_integ/test_bedrock_s3_location.py"
+            fi
+
+            # src/strands/tools/mcp/** → tests_integ/mcp/
+            if [ "$FILTER_MCP" = "true" ]; then
+              add_group "mcp" "tests_integ/mcp/"
+            fi
+
+            # src/strands/tools/** (excluding mcp) → tool integration tests
+            if [ "$FILTER_TOOLS" = "true" ]; then
+              add_group "tools" "tests_integ/tools/ tests_integ/test_function_tools.py tests_integ/test_hot_tool_reload_decorator.py tests_integ/test_invalid_tool_names.py tests_integ/test_tool_context_injection.py tests_integ/test_tool_retry_hook.py tests_integ/test_structured_output_agent_loop.py"
+            fi
+
+            # src/strands/multiagent/** → multi-agent and a2a tests
+            if [ "$FILTER_MULTIAGENT" = "true" ]; then
+              add_group "multiagent" "tests_integ/a2a/ tests_integ/test_multiagent_graph.py tests_integ/test_multiagent_swarm.py tests_integ/test_a2a_executor.py"
+            fi
+
+            # src/strands/agent/** + event_loop/** + core files → agent integration tests
+            if [ "$FILTER_AGENT_CORE" = "true" ]; then
+              add_group "agent-core" "tests_integ/test_agent_async.py tests_integ/test_agent_json.py tests_integ/test_cancellation.py tests_integ/test_context_overflow.py tests_integ/test_max_tokens_reached.py tests_integ/test_stream_agent.py tests_integ/test_summarizing_conversation_manager_integration.py"
+            fi
+
+            # src/strands/hooks/** + plugins/** → hooks and interrupt tests
+            if [ "$FILTER_HOOKS" = "true" ]; then
+              add_group "hooks" "tests_integ/hooks/ tests_integ/interrupts/"
+            fi
+
+            # src/strands/session/** → session tests
+            if [ "$FILTER_SESSION" = "true" ]; then
+              add_group "session" "tests_integ/test_session.py"
+            fi
+
+            # src/strands/experimental/bidi/** → bidirectional streaming tests
+            if [ "$FILTER_BIDI" = "true" ]; then
+              add_group "bidi" "tests_integ/bidi/"
+            fi
+
+            # src/strands/experimental/steering/** + vended_plugins/steering/** + vended_plugins/skills/** → steering tests
+            if [ "$FILTER_STEERING" = "true" ]; then
+              add_group "steering" "tests_integ/steering/ tests_integ/test_skills_plugin.py"
+            fi
+          fi
+
+          # Build the final JSON matrix from collected groups
+          if [ ${#groups[@]} -eq 0 ]; then
+            matrix='{"include":[]}'
+            echo "has-tests=false" >> "$GITHUB_OUTPUT"
+            echo "No integration test groups matched the changed paths — skipping all tests"
+          else
+            joined=$(IFS=,; echo "${groups[*]}")
+            matrix="{\"include\":[$joined]}"
+            echo "has-tests=true" >> "$GITHUB_OUTPUT"
+            echo "Test groups to run (${#groups[@]}): $(printf '%s\n' "${groups[@]}" | jq -r '.group' | tr '\n' ' ')"
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  integration-tests:
+    name: "Tests (${{ matrix.group }})"
+    runs-on: ubuntu-latest
+    needs: [authorization-check, detect-changes]
+    if: needs.detect-changes.outputs.has-tests == 'true'
+    environment: ${{ needs.authorization-check.outputs.approval-env }}
+    permissions:
+      id-token: write
+      pull-requests: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-changes.outputs.test-matrix) }}
+    steps:
+      - name: Configure Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+         role-to-assume: ${{ secrets.STRANDS_INTEG_TEST_ROLE }}
+         aws-region: us-east-1
+         mask-aws-account-id: true
+
+      - name: Checkout head commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        # Pin virtualenv until hatch is fixed.
+        # See https://github.com/pypa/hatch/issues/2193
+        run: |
+          pip install --no-cache-dir hatch 'virtualenv<21'
+
+      - name: Run integration tests (${{ matrix.group }})
+        env:
+          AWS_REGION: us-east-1
+          AWS_REGION_NAME: us-east-1 # Needed for LiteLLM
+          STRANDS_TEST_API_KEYS_SECRET_NAME: ${{ secrets.STRANDS_TEST_API_KEYS_SECRET_NAME }}
+        id: tests
+        run: |
+          hatch test ${{ matrix.test-paths }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-${{ matrix.group }}
+          path: ./build/test-results.xml
+
+  upload-metrics:
+    runs-on: ubuntu-latest
+    needs: [detect-changes, integration-tests]
+    if: always() && needs.detect-changes.outputs.has-tests == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+         role-to-assume: ${{ secrets.STRANDS_INTEG_TEST_ROLE }}
+         aws-region: us-east-1
+         mask-aws-account-id: true
+
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          sparse-checkout: |
+            .github/scripts
+          persist-credentials: false
+
+      - name: Download all test results
+        uses: actions/download-artifact@v8
+        with:
+          pattern: test-results-*
+          path: test-results/
+
+      - name: Publish test metrics to CloudWatch
+        run: |
+          pip install --no-cache-dir boto3
+          for results_file in test-results/*/test-results.xml; do
+            if [ -f "$results_file" ]; then
+              echo "Publishing metrics from: $results_file"
+              python .github/scripts/upload-integ-test-metrics.py "$results_file" ${{ github.event.repository.name }}
+            fi
+          done

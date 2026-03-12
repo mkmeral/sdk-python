@@ -5,6 +5,8 @@ on:
     branches: [main]
   merge_group: # Run tests in merge queue
     types: [checks_requested]
+  schedule:
+    - cron: '0 6 * * *' # Daily full run at 6:00 AM UTC
 
 jobs:
   authorization-check:
@@ -18,7 +20,7 @@ jobs:
         id: auth
         uses: strands-agents/devtools/authorization-check@main
         with:
-          skip-check: ${{ github.event_name == 'merge_group' }}
+          skip-check: ${{ github.event_name == 'merge_group' || github.event_name == 'schedule' }}
           username: ${{ github.event.pull_request.user.login || 'invalid' }}
           allowed-roles: 'maintain,triage,write,admin'
 
@@ -33,7 +35,7 @@ jobs:
       has-tests: ${{ steps.set-matrix.outputs.has-tests }}
     steps:
       - name: Detect changed paths
-        if: github.event_name != 'merge_group'
+        if: github.event_name == 'pull_request_target'
         uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -77,7 +79,7 @@ jobs:
       - name: Build test matrix
         id: set-matrix
         env:
-          IS_MERGE_GROUP: ${{ github.event_name == 'merge_group' }}
+          IS_MERGE_GROUP: ${{ github.event_name == 'merge_group' || github.event_name == 'schedule' }}
           FILTER_RUN_ALL: ${{ steps.filter.outputs.run-all }}
           FILTER_MODELS: ${{ steps.filter.outputs.models }}
           FILTER_BEDROCK: ${{ steps.filter.outputs.bedrock-specific }}
@@ -99,7 +101,7 @@ jobs:
           }
 
           if [ "$IS_MERGE_GROUP" = "true" ] || [ "$FILTER_RUN_ALL" = "true" ]; then
-            # Run ALL tests for merge queue or when foundational code changes
+            # Run ALL tests for merge queue, scheduled runs, or when foundational code changes
             # (types, handlers, telemetry, CI config, test infra, pyproject.toml)
             add_group "all" "tests_integ"
           else

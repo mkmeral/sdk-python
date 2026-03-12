@@ -13,8 +13,8 @@ Example:
     ```
 """
 
-from collections.abc import Callable
-from typing import Generic, cast, overload
+from collections.abc import Awaitable, Callable
+from typing import Any, Generic, cast, overload
 
 from ..hooks._type_inference import infer_event_types
 from ..hooks.registry import HookCallback, TEvent
@@ -26,9 +26,14 @@ class _WrappedHookCallable(HookCallback, Generic[TEvent]):
     _hook_event_types: list[type[TEvent]]
 
 
-# Handle @hook
+# Handle @hook on a standalone function
 @overload
-def hook(__func: HookCallback) -> _WrappedHookCallable: ...
+def hook(__func: HookCallback[TEvent]) -> _WrappedHookCallable[TEvent]: ...
+
+
+# Handle @hook on a class method (self + event)
+@overload
+def hook(__func: Callable[[Any, TEvent], None | Awaitable[None]]) -> _WrappedHookCallable[TEvent]: ...
 
 
 # Handle @hook()
@@ -37,7 +42,7 @@ def hook() -> Callable[[HookCallback], _WrappedHookCallable]: ...
 
 
 def hook(
-    func: HookCallback | None = None,
+    func: HookCallback | Callable[..., None | Awaitable[None]] | None = None,
 ) -> _WrappedHookCallable | Callable[[HookCallback], _WrappedHookCallable]:
     """Mark a method as a hook callback for automatic registration.
 

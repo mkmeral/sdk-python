@@ -317,8 +317,8 @@ Yes — phase 0 and v1, prototyped in an internal harness first.
 ---
 
 <a id="appendix-a"></a>
-<details>
-<summary><b>Appendix A: Full API surface</b></summary>
+
+## Appendix A: Full API surface
 
 ```python
 def make_use_agent(
@@ -411,8 +411,6 @@ def make_default_builder(cfg: UseAgentConfig) -> AgentBuilder:
         )
     return build
 ```
-
-</details>
 
 <a id="appendix-b"></a>
 <details>
